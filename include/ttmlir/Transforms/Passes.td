@@ -154,4 +154,34 @@ def ExtractGPUModules: Pass<"extract-gpu-modules", "::mlir::ModuleOp">
   let dependentDialects = ["mlir::LLVM::LLVMDialect"];
 }
 
+def TileMatmul: Pass<"tile-matmul", "::mlir::func::FuncOp"> {
+  let summary = "Tile 2D matmul operations into tiled reshape + batched matmul + reduce sum";
+  let description = [{
+    This pass rewrites 2D ttir.matmul operations into tiled sequences that decompose
+    the operation into: tile (reshape) → matmul → reduce (sum).
+
+    With tile size T = 32, for a matmul of shape A[M, K] @ B[K, N] -> C[M, N]:
+    1. Reshape A[M, K] -> A_tiled[K/T, M, T]
+    2. Reshape B[K, N] -> B_tiled[K/T, T, N]
+    3. Matmul A_tiled[K/T, M, T] @ B_tiled[K/T, T, N] -> [K/T, M, N]
+    4. Sum over dimension 0 -> [M, N]
+
+    This enables efficient tile-wise computation on hardware with smaller working sets.
+
+    Example:
+    ```mlir
+    // Before: A[64, 128] @ B[128, 96] -> C[64, 96]
+    %c = "ttir.matmul"(%a, %b) : (tensor<64x128xbf16>, tensor<128x96xbf16>) -> tensor<64x96xbf16>
+
+    // After: with tile size T=32, K/T = 4 tiles
+    %a_tiled = "ttir.reshape"(%a) <{shape = [4 : i32, 64 : i32, 32 : i32]}> : (tensor<64x128xbf16>) -> tensor<4x64x32xbf16>
+    %b_tiled = "ttir.reshape"(%b) <{shape = [4 : i32, 32 : i32, 96 : i32]}> : (tensor<128x96xbf16>) -> tensor<4x32x96xbf16>
+    %matmul_tiles = "ttir.matmul"(%a_tiled, %b_tiled) : (tensor<4x64x32xbf16>, tensor<4x32x96xbf16>) -> tensor<4x64x96xbf16>
+    %c = "ttir.sum"(%matmul_tiles) <{dim_arg = [0 : i32], keep_dim = false}> : (tensor<4x64x96xbf16>) -> tensor<64x96xbf16>
+    ```
+  }];
+
+  let dependentDialects = ["::mlir::tt::ttir::TTIRDialect"];
+}
+
 #endif
